@@ -1,8 +1,9 @@
-import zipfile
+import os
 import io
+import json
+import zipfile
 import numpy as np
 import matplotlib.pyplot as plt
-import json
 from PIL import Image
 
 import torch
@@ -107,7 +108,12 @@ class VAE(nn.Module):
 
         x = self.decoder(z)
 
-        return x, z
+        return x, z, mu, std
+
+
+def kl_divergence(mu, std):
+    kl = (std**2 + mu**2 - torch.log(std) - 1/2).mean()
+    return kl
 
 
 class VaeTrainer:
@@ -133,21 +139,23 @@ class VaeTrainer:
         while i_iter < num_iters:
             for i_batch, (batch,) in enumerate(loader):
                 batch = batch.cuda()
-                pred_batch, z_batch = self.vae(batch)
+                pred_batch, z_batch, mu_batch, std_batch = self.vae(batch)
                 optimizer.zero_grad()
                 loss_recon = F.mse_loss(batch, pred_batch)
-                z_norm_loss = torch.norm(z_batch)
-                loss = loss_recon + 0.5e-4 * z_norm_loss
+                loss_kl = kl_divergence(mu_batch, std_batch)
+                loss = loss_recon + 0.001*loss_kl
                 loss.backward()
                 optimizer.step()
                 if i_iter % 100 == 0:
-                    # print(z_batch[0, ...])
-                    print(i_iter, loss_recon.item(), z_norm_loss.item(), loss.item())
-                    if False:
+                    print(i_iter, loss_recon.item(), loss_kl.item(), loss.item())
+                    if True and i_iter % 200 == 0:
                         fig, axs = plt.subplots(1, 2)
                         axs[0].imshow(batch[0, 0, ...].detach().cpu().numpy(), cmap='gray')
                         axs[1].imshow(pred_batch[0, 0, ...].detach().cpu().numpy(), cmap='gray')
-                        plt.show()
+                        os.makedirs("vae_dump", exist_ok=True)
+                        plt.savefig(f"vae_dump/{i_iter:06d}.png")
+                        # plt.show()
+                        plt.close()
                     torch.save(self.vae.state_dict(), "vae.pth")
                 i_iter += 1
 
@@ -231,9 +239,9 @@ class ClassifierTrainer:
 
         optimizable_params = [p for p in self.model.parameters() if p.requires_grad]
         print("len(optimizable_params)", len(optimizable_params))
-        optimizer = torch.optim.Adam(optimizable_params, lr=1e-2, weight_decay=1e-4)
+        optimizer = torch.optim.Adam(optimizable_params, lr=1e-2, weight_decay=2e-2)
 
-        num_iters = 10_000
+        num_iters = 5_000
         i_iter = 0
         while i_iter < num_iters:
             for i_batch, (image_batch, anno_batch) in enumerate(train_loader):

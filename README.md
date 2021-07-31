@@ -8,7 +8,7 @@ The solution is trained in two stages. Stage one is completely unsupervised vari
 
 ![](assets/vae2.png)
 
-The second stage is supervised classification on a manually annotated 40 samples (20 open and 20 closed eyes). 26 samples go to training, 14 go to validation. Validation accuracy reaches 89% suggesting that VAE-based pretraining helps to boost accuracy even for an extremely small dataset.
+The second stage is supervised classification on a manually annotated 40 samples (20 open and 20 closed eyes). 26 samples go to training, 14 go to validation. Validation accuracy reaches 84% suggesting that VAE-based pretraining helps to boost accuracy even for an extremely small dataset.
 
 To create conda environment:
 ```bash
