@@ -1,7 +1,10 @@
+import contextlib
 import os
 import io
 import json
 import zipfile
+from collections import OrderedDict
+
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -125,13 +128,10 @@ class VaeTrainer:
         self.vae.train()
 
         image_list, _ = load_archive()
-
         tensor_data = (1 / 255 * torch.tensor(image_list).float()).unsqueeze(1)
-
         dataset = torch.utils.data.TensorDataset(tensor_data)
-
-        loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True, num_workers=0)
-
+        loader = torch.utils.data.DataLoader(dataset, batch_size=256,
+                                             shuffle=True, num_workers=0)
         optimizer = torch.optim.Adam(self.vae.parameters(), lr=1e-2)
 
         num_iters = 10_000
@@ -164,18 +164,21 @@ class Classifier(nn.Module):
     def __init__(self, latent_size, pretrained_model_path="vae.pth"):
         super().__init__()
         self.encoder = Encoder(latent_size)
-        if True:
+        self.freeze_backbone = pretrained_model_path is not None
+        if pretrained_model_path is not None:
             state_dict = torch.load(pretrained_model_path)
-            state_dict = {k[len("encoder."):]: v
-                          for k, v in state_dict.items() if "encoder." in k}
+            state_dict = OrderedDict(((k[len("encoder."):], v)
+                                     for k, v in state_dict.items()
+                                      if "encoder." in k))
             self.encoder.load_state_dict(state_dict, strict=True)
+            for param in self.encoder.parameters():
+                param.requires_grad = False
         self.encoder.eval()
-        for param in self.encoder.parameters():
-            param.requires_grad = False
         self.class_fc = nn.Linear(latent_size, 1)
 
     def forward(self, x):
-        with torch.no_grad():
+        with torch.no_grad() if self.freeze_backbone \
+                else contextlib.nullcontext():
             mu, log_var = self.encoder(x)
         logits = self.class_fc(mu)
         x = torch.sigmoid(logits)
@@ -188,16 +191,20 @@ class Classifier(nn.Module):
 
 
 class ClassifierTrainer:
-    def __init__(self, latent_size):
-        self.model = Classifier(latent_size)
+    def __init__(self, latent_size, from_scratch=False):
+        self.model = Classifier(
+            latent_size,
+            **(dict(pretrained_model_path=None)
+               if from_scratch else {}))
         self.model.cuda()
+        self.prediction_threshold = 0.5
 
     def _load_dataset(self, is_train):
         with open("annotation.json", "r") as f:
             dataset = json.load(f)
         flat_list = []
         for label, lst in dataset.items():
-            val_div = 3
+            val_div = 2
             if is_train:
                 lst = lst[len(lst) // val_div:]
             else:
@@ -239,7 +246,7 @@ class ClassifierTrainer:
 
         optimizable_params = [p for p in self.model.parameters() if p.requires_grad]
         print("len(optimizable_params)", len(optimizable_params))
-        optimizer = torch.optim.Adam(optimizable_params, lr=1e-2, weight_decay=2e-2)
+        optimizer = torch.optim.Adam(optimizable_params, lr=1e-2, weight_decay=2e-5)
 
         num_iters = 5_000
         i_iter = 0
@@ -254,11 +261,12 @@ class ClassifierTrainer:
                 loss.backward()
                 optimizer.step()
 
-                hard_pred_batch = pred_batch > 0.5
-                anno_bool_batch = anno_batch > 0.5
+                hard_pred_batch = pred_batch > self.prediction_threshold
+                anno_bool_batch = anno_batch > self.prediction_threshold
                 if i_iter % 1000 == 0:
                     print(i_iter, " train_loss=", loss.item())
-                    accuracy = torch.sum(torch.eq(hard_pred_batch, anno_bool_batch)) / len(anno_bool_batch)
+                    accuracy = torch.sum(torch.eq(hard_pred_batch, anno_bool_batch)) \
+                               / len(anno_bool_batch)
                     print("train_accuracy=", accuracy.item())
                     if False:
                         sample_idx = 0
@@ -274,6 +282,13 @@ class ClassifierTrainer:
                     torch.save(self.model.state_dict(), "classifier.pth")
                 i_iter += 1
 
+        print("weight=", self.model.class_fc.weight.data)
+        print("bias=", self.model.class_fc.bias.data)
+
+        weights_np = self.model.class_fc.weight.data.cpu().numpy()
+        sorted_np = np.sort(weights_np)
+        print(sorted_np)
+
     def _validate(self, val_loader):
         self.model.train(False)
         image_batch, anno_batch = next(iter(val_loader))
@@ -283,16 +298,20 @@ class ClassifierTrainer:
             pred_batch = self.model(image_batch)
             loss = F.binary_cross_entropy(pred_batch, anno_batch)
         print("val_loss=", loss.item())
-        hard_pred_batch = pred_batch > 0.5
-        anno_bool_batch = anno_batch > 0.5
-        accuracy = torch.sum(torch.eq(hard_pred_batch, anno_bool_batch)) / len(anno_bool_batch)
+        hard_pred_batch = pred_batch > self.prediction_threshold
+        anno_bool_batch = anno_batch > self.prediction_threshold
+        accuracy = torch.sum(torch.eq(hard_pred_batch, anno_bool_batch)) / \
+                   len(anno_bool_batch)
         print("val_accuracy=", accuracy.item())
 
 
 def main():
-    print(torch.cuda.is_available())
+    print("torch.cuda.is_available", torch.cuda.is_available())
 
     latent_size = LATENT_SIZE
+
+    class_trainer = ClassifierTrainer(latent_size, from_scratch=True)
+    class_trainer.train()
 
     vae_trainer = VaeTrainer(latent_size=latent_size)
     vae_trainer.train()

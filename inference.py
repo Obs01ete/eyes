@@ -37,6 +37,5 @@ def main():
             f.write(f"{file},{pred}\n")
 
 
-
 if __name__ == "__main__":
     main()
